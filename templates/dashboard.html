@@ -1648,35 +1648,94 @@
             if (file) handleFileUpload(file);
         }
 
-        async function handleFileUpload(file) {
-            if (!file) return;
-            showLoading('Procesando archivo...');
+       async function handleFileUpload(file) {
+    if (!file) return;
+    showLoading('Subiendo archivo...');
 
-            const formData = new FormData();
-            formData.append('file', file);
+    const formData = new FormData();
+    formData.append('file', file);
 
-            try {
-                const res = await fetch('/upload', { method: 'POST', body: formData });
-                const data = await res.json();
+    try {
+        // PASO 1: Subir el archivo (respuesta rápida)
+        const res = await fetch('/upload', {
+            method: 'POST',
+            body: formData
+        });
 
-                if (data.error) {
-                    alert('Error: ' + data.error);
-                    hideLoading();
-                    return;
-                }
+        const data = await res.json();
 
-                DATA = data;
-                document.getElementById('upload-section').style.display = 'none';
-                document.getElementById('content-section').style.display = 'block';
-                populateFilters();
-                applyFilters();
-                hideLoading();
-            } catch (err) {
-                alert('Error al procesar el archivo: ' + err);
-                hideLoading();
-            }
+        if (data.error) {
+            alert('❌ Error: ' + data.error);
+            hideLoading();
+            return;
         }
 
+        // PASO 2: Si hay job_id, empezar polling
+        if (data.job_id) {
+            showLoading('Procesando archivo en segundo plano... (esto puede tomar varios segundos)');
+
+            const jobId = data.job_id;
+            let completed = false;
+            let attempts = 0;
+            const maxAttempts = 60; // 2 minutos máximo (60 * 2s)
+
+            while (!completed && attempts < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, 2000)); // Esperar 2 segundos
+                attempts++;
+
+                try {
+                    const statusRes = await fetch(`/api/status/${jobId}`);
+                    const statusData = await statusRes.json();
+
+                    if (statusData.status === 'completed') {
+                        completed = true;
+
+                        // Guardar los datos
+                        DATA = statusData.data;
+                        document.getElementById('upload-section').style.display = 'none';
+                        document.getElementById('content-section').style.display = 'block';
+
+                        populateFilters();
+                        applyFilters();
+                        hideLoading();
+
+                        showFeedback('✅ Archivo procesado correctamente', 'success');
+
+                    } else if (statusData.status === 'error') {
+                        completed = true;
+                        hideLoading();
+                        alert('❌ Error al procesar: ' + (statusData.error || 'Error desconocido'));
+                        showFeedback('❌ Error: ' + (statusData.error || 'Error desconocido'), 'error');
+                    }
+
+                } catch (e) {
+                    console.log('⏳ Esperando respuesta del servidor... (intento ' + attempts + ')');
+                }
+            }
+
+            if (!completed) {
+                hideLoading();
+                alert('⏰ El procesamiento está tomando demasiado tiempo. Intenta con un archivo más pequeño.');
+                showFeedback('⏰ Tiempo de espera agotado. Intenta con un archivo más pequeño.', 'warning');
+            }
+
+        } else {
+            // Fallback: si no hay job_id (versión anterior)
+            DATA = data;
+            document.getElementById('upload-section').style.display = 'none';
+            document.getElementById('content-section').style.display = 'block';
+            populateFilters();
+            applyFilters();
+            hideLoading();
+        }
+
+    } catch (err) {
+        console.error('Error en handleFileUpload:', err);
+        alert('❌ Error al procesar el archivo: ' + err.message);
+        hideLoading();
+        showFeedback('❌ Error: ' + err.message, 'error');
+    }
+}
         function resetUpload() {
             DATA = { resumen: [], detalle: {}, meses: [] };
             resetUploadUI();
@@ -1889,32 +1948,31 @@
         }
 
         async function saveHorarios() {
-            showLoading('Guardando horarios y recalculando...');
-            try {
-                console.log('📤 Enviando horarios:', horariosEspeciales);
+    showLoading('Guardando horarios y recalculando...');
+    try {
+        console.log('📤 Enviando horarios:', horariosEspeciales);
 
-                const res = await fetch('/api/horarios', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ horarios: horariosEspeciales })
-                });
-                const data = await res.json();
+        const res = await fetch('/api/horarios', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ horarios: horariosEspeciales })
+        });
+        const data = await res.json();
 
-                if (data.ok) {
-                    showFeedback(`Horarios guardados (${data.horarios_aplicados || 0} días especiales)`, 'success');
+        if (data.ok) {
+            showFeedback(`Horarios guardados (${data.horarios_aplicados || 0} días especiales)`, 'success');
 
-                    // 🔥 RECALCULAR DATOS CON LOS NUEVOS HORARIOS
-                    await recalcData();
-                } else {
-                    showFeedback('Error: ' + (data.error || 'No se pudieron guardar los horarios'), 'error');
-                }
-            } catch (err) {
-                showFeedback('Error al guardar: ' + err, 'error');
-            } finally {
-                hideLoading();
-            }
+            // 🔥 RECALCULAR DATOS CON LOS NUEVOS HORARIOS
+            await recalcData();
+        } else {
+            showFeedback('Error: ' + (data.error || 'No se pudieron guardar los horarios'), 'error');
         }
-
+    } catch (err) {
+        showFeedback('Error al guardar: ' + err, 'error');
+    } finally {
+        hideLoading();
+    }
+}
         async function recalcData() {
             try {
                 const res = await fetch('/api/recalcular', { method: 'POST' });
