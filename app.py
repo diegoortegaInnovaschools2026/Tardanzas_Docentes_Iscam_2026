@@ -75,47 +75,64 @@ def calcular_minutos_tarde_con_horario(fecha_str, registro_entrada_str):
     except Exception:
         return 0
 
-
 def procesar_excel(df_raw: pd.DataFrame) -> dict:
+    """
+    Procesa el Excel con nombres de columnas exactos.
+    """
     df = df_raw.copy()
-    df.columns = [
-        c.strip().lower()
-        .replace("á", "a").replace("é", "e").replace("í", "i")
-        .replace("ó", "o").replace("ú", "u")
-        for c in df.columns
-    ]
-
-    col_map = {
-        "nombre del colaborador": "nombre",
-        "cargo": "cargo",
-        "fecha": "fecha",
-        "día": "dia",
-        "dia": "dia",
-        "tipo de marcación": "tipo_marcacion",
-        "tipo de marcacion": "tipo_marcacion",
-        "registro de entrada": "registro_entrada",
-        "estado de marcación": "estado_marcacion",
-        "estado de marcacion": "estado_marcacion",
+    
+    # *** NUEVO: Mapeo directo de nombres exactos (sin convertir a minúsculas) ***
+    columnas_esperadas = {
+        "Nombre del Colaborador": "nombre",
+        "Cargo": "cargo",
+        "Fecha": "fecha",
+        "Día": "dia",
+        "Tipo de Marcación": "tipo_marcacion",
+        "Registro de Entrada": "registro_entrada",
+        "Estado de Marcación": "estado_marcacion",
+        "Horario de Entrada": "horario_entrada",
+        "Tiempo Acumulado Tardanzas": "tiempo_acumulado"
     }
-    df.rename(columns=lambda x: col_map.get(x, x), inplace=True)
-
+    
+    # Renombrar solo las columnas que existen
+    columnas_existentes = {}
+    for col_original, col_nuevo in columnas_esperadas.items():
+        if col_original in df.columns:
+            columnas_existentes[col_original] = col_nuevo
+        else:
+            # Intentar buscar por coincidencia parcial (case-insensitive)
+            for col in df.columns:
+                if col.strip().lower() == col_original.lower():
+                    columnas_existentes[col] = col_nuevo
+                    break
+    
+    if not columnas_existentes:
+        raise ValueError(f"No se encontraron columnas esperadas. Columnas disponibles: {list(df.columns)}")
+    
+    df = df.rename(columns=columnas_existentes)
+    
+    # Verificar columnas requeridas
     req = ["nombre", "cargo", "fecha", "tipo_marcacion", "registro_entrada"]
     faltantes = [c for c in req if c not in df.columns]
     if faltantes:
-        raise ValueError(f"Columnas faltantes: {faltantes}")
-
+        raise ValueError(f"Columnas faltantes: {faltantes}. Columnas disponibles: {list(df.columns)}")
+    
+    # Filtrar PROFESORES
     df = df[df["cargo"].astype(str).str.strip().str.upper().str.contains("PROFESOR")].copy()
     if df.empty:
         raise ValueError("No se encontraron filas con Cargo que contenga 'PROFESOR'.")
-
+    
+    # Filtrar ENTRADAS
     df = df[df["tipo_marcacion"].astype(str).str.strip().str.lower() == "entrada"].copy()
     if df.empty:
         raise ValueError("No se encontraron filas con Tipo de Marcación = 'Entrada'.")
-
+    
+    # Procesar fechas
     df["fecha"] = pd.to_datetime(df["fecha"], dayfirst=True, errors="coerce")
     df = df.dropna(subset=["fecha"])
     df["mes_anio"] = df["fecha"].dt.strftime("%Y-%m")
-
+    
+    # Calcular minutos de tardanza
     df["minutos_tarde"] = df.apply(
         lambda row: calcular_minutos_tarde_con_horario(
             row["fecha"].strftime("%Y-%m-%d") if pd.notna(row["fecha"]) else "",
@@ -123,14 +140,15 @@ def procesar_excel(df_raw: pd.DataFrame) -> dict:
         ),
         axis=1
     )
-
+    
     df["uso_cuponera"] = df["minutos_tarde"] >= 60
     df["minutos_tarde_efectivo"] = df.apply(
         lambda row: 0 if row["uso_cuponera"] else row["minutos_tarde"],
         axis=1
     )
     df["tiene_tardanza"] = df["minutos_tarde_efectivo"] > 0
-
+    
+    # Generar resumen
     resumen_rows = []
     for (nombre, mes), g in df.groupby(["nombre", "mes_anio"]):
         total = int(round(g["minutos_tarde_efectivo"].sum()))
@@ -143,7 +161,8 @@ def procesar_excel(df_raw: pd.DataFrame) -> dict:
                 "cuponeras": int(g["uso_cuponera"].sum()),
                 "tardanzas": int(g["tiene_tardanza"].sum()),
             })
-
+    
+    # Generar detalle
     detalle = {}
     for (nombre, mes), g in df.groupby(["nombre", "mes_anio"]):
         key = f"{nombre}||{mes}"
@@ -171,7 +190,7 @@ def procesar_excel(df_raw: pd.DataFrame) -> dict:
                     "minutos": int(row["minutos_tarde"]),
                     "cuponera": True,
                 })
-
+        
         if dias:
             total_efectivo = int(round(g["minutos_tarde_efectivo"].sum()))
             detalle[key] = {
@@ -181,7 +200,7 @@ def procesar_excel(df_raw: pd.DataFrame) -> dict:
                 "cuponeras": int(g["uso_cuponera"].sum()),
                 "dias": dias,
             }
-
+    
     meses_unicos = sorted(df["mes_anio"].unique())
     meses = [
         {
@@ -190,9 +209,8 @@ def procesar_excel(df_raw: pd.DataFrame) -> dict:
         }
         for m in meses_unicos
     ]
-
+    
     return {"resumen": resumen_rows, "detalle": detalle, "meses": meses}
-
 
 def exportar_excel(resumen: list) -> io.BytesIO:
     df = pd.DataFrame(resumen)
@@ -279,24 +297,41 @@ def api_me():
 def upload():
     global LAST_RESUMEN, LAST_DETALLE, LAST_MESES, LAST_DF
     print("📤 Recibiendo archivo...")
-    if "file" not in request.files:
-        return jsonify({"error": "No se envió ningún archivo"}), 400
-    file = request.files["file"]
-    if not file.filename:
-        return jsonify({"error": "Nombre de archivo vacío"}), 400
+    
     try:
+        if "file" not in request.files:
+            return jsonify({"error": "No se envió ningún archivo"}), 400
+        
+        file = request.files["file"]
+        
+        if not file.filename:
+            return jsonify({"error": "Nombre de archivo vacío"}), 400
+        
+        if not file.filename.endswith('.xlsx'):
+            return jsonify({"error": "El archivo debe ser .xlsx"}), 400
+        
+        # Leer el Excel
         df = pd.read_excel(file)
-        LAST_DF = df
+        print(f"📊 Columnas encontradas: {list(df.columns)}")
+        
+        # Procesar
         data = procesar_excel(df)
+        
+        # Guardar en variables globales
+        LAST_DF = df
         LAST_RESUMEN = data["resumen"]
         LAST_DETALLE = data["detalle"]
         LAST_MESES = data["meses"]
+        
         print(f"✅ Archivo procesado: {len(LAST_RESUMEN)} registros")
         return jsonify(data)
+        
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        return jsonify({"error": str(e)}), 400
-
+        import traceback
+        error_msg = str(e)
+        print(f"❌ Error: {error_msg}")
+        print(traceback.format_exc())
+        return jsonify({"error": error_msg}), 400
 
 @app.route("/api/horarios", methods=["POST"])
 @login_required
